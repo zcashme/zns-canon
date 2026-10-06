@@ -90,8 +90,8 @@ pub fn dev_sealing_key(context: &[u8]) -> [u8; 32] {
 pub fn derive_sealing_key(_context: &[u8]) -> Result<[u8; 32], TeeError> {
     use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 
-    let mut firmware =
-        Firmware::open().map_err(|e| TeeError::SealingKey(format!("SEV-SNP firmware open: {e}")))?;
+    let mut firmware = Firmware::open()
+        .map_err(|e| TeeError::SealingKey(format!("SEV-SNP firmware open: {e}")))?;
     let mut guest_fields = GuestFieldSelect::default();
     guest_fields.set_guest_policy(true);
     guest_fields.set_measurement(true);
@@ -107,8 +107,8 @@ pub fn derive_sealing_key(_context: &[u8]) -> Result<[u8; 32], TeeError> {
 pub fn get_attestation(report_data: &[u8; 64]) -> Result<Attestation, TeeError> {
     use sev::firmware::guest::Firmware;
 
-    let mut firmware =
-        Firmware::open().map_err(|e| TeeError::Attestation(format!("SEV-SNP firmware open: {e}")))?;
+    let mut firmware = Firmware::open()
+        .map_err(|e| TeeError::Attestation(format!("SEV-SNP firmware open: {e}")))?;
     let bytes = firmware
         .get_report(None, Some(*report_data), None)
         .map_err(|e| TeeError::Attestation(format!("SEV-SNP get_report: {e}")))?;
