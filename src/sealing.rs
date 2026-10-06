@@ -85,13 +85,32 @@ pub fn dev_sealing_key(context: &[u8]) -> [u8; 32] {
 /// them makes the key brittle to launch-blob drift. VCEK
 /// (`root_key_select = false`) is stable across reboots; VMRK is random
 /// per launch without a Migration Agent and would brick the capsule on
+/// Classifies a guest-firmware open failure. A missing `/dev/sev-guest`
+/// means "this is not an SNP guest" — [`TeeError::Unavailable`], the
+/// promised off-platform signal. Any other failure is operational for
+/// the specific operation and carries the detail.
+#[cfg(target_os = "linux")]
+fn guest_open_error(
+    e: std::io::Error,
+    operation: &str,
+    operational: fn(String) -> TeeError,
+) -> TeeError {
+    use std::io::ErrorKind;
+
+    if e.kind() == ErrorKind::NotFound {
+        TeeError::Unavailable
+    } else {
+        operational(format!("SEV-SNP {operation}: {e}"))
+    }
+}
+
 /// first reboot.
 #[cfg(target_os = "linux")]
 pub fn derive_sealing_key(_context: &[u8]) -> Result<[u8; 32], TeeError> {
     use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 
-    let mut firmware = Firmware::open()
-        .map_err(|e| TeeError::SealingKey(format!("SEV-SNP firmware open: {e}")))?;
+    let mut firmware =
+        Firmware::open().map_err(|e| guest_open_error(e, "firmware open", TeeError::SealingKey))?;
     let mut guest_fields = GuestFieldSelect::default();
     guest_fields.set_guest_policy(true);
     guest_fields.set_measurement(true);
@@ -108,7 +127,7 @@ pub fn get_attestation(report_data: &[u8; 64]) -> Result<Attestation, TeeError> 
     use sev::firmware::guest::Firmware;
 
     let mut firmware = Firmware::open()
-        .map_err(|e| TeeError::Attestation(format!("SEV-SNP firmware open: {e}")))?;
+        .map_err(|e| guest_open_error(e, "firmware open", TeeError::Attestation))?;
     let bytes = firmware
         .get_report(None, Some(*report_data), None)
         .map_err(|e| TeeError::Attestation(format!("SEV-SNP get_report: {e}")))?;
@@ -135,6 +154,25 @@ pub fn get_attestation(_report_data: &[u8; 64]) -> Result<Attestation, TeeError>
 #[cfg(all(test, feature = "non-tee"))]
 mod tests {
     use super::*;
+
+    /// The missing-device classification: NotFound is the promised
+    /// off-platform signal, everything else stays operational.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_guest_device_is_unavailable() {
+        use std::io::ErrorKind;
+
+        let missing = std::io::Error::from(ErrorKind::NotFound);
+        assert!(matches!(
+            guest_open_error(missing, "firmware open", TeeError::SealingKey),
+            TeeError::Unavailable
+        ));
+        let denied = std::io::Error::from(ErrorKind::PermissionDenied);
+        assert!(matches!(
+            guest_open_error(denied, "firmware open", TeeError::SealingKey),
+            TeeError::SealingKey(_)
+        ));
+    }
 
     #[test]
     fn dev_sealing_key_is_deterministic() {
