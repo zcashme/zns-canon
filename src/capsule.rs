@@ -21,6 +21,8 @@ use thiserror::Error;
 use zeroize::Zeroize;
 use zip32::fingerprint::SeedFingerprint;
 
+use crate::sealing::SealingKey;
+
 /// The capsule magic; the first 8 bytes of every ZNS seed capsule.
 pub const MAGIC: [u8; 8] = *b"ZNS_SEED";
 
@@ -148,7 +150,7 @@ pub fn serialize_capsule(capsule: &Capsule) -> Result<Vec<u8>, CapsuleError> {
 /// as additional authenticated data; any tampering with either fails
 /// decryption.
 pub fn seal_seed<R>(
-    sealing_key: &[u8; 32],
+    sealing_key: &SealingKey,
     seed: &Secret<[u8; SEED_LEN]>,
     rng: &mut R,
 ) -> Result<Capsule, CapsuleError>
@@ -159,9 +161,8 @@ where
         .expect("ZIP-32 accepts 32-byte seeds")
         .to_bytes();
 
-    let mut raw_key = *sealing_key;
     let cipher =
-        XChaCha20Poly1305::new_from_slice(&raw_key).expect("sealing key is exactly 32 bytes");
+        XChaCha20Poly1305::new_from_slice(sealing_key.expose()).expect("sealing key is 32 bytes");
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rng.fill_bytes(&mut nonce_bytes);
@@ -179,7 +180,6 @@ where
             },
         )
         .map_err(|_| CapsuleError::Seal);
-    raw_key.zeroize();
     let ciphertext = ciphertext?;
 
     Ok(Capsule {
@@ -197,7 +197,7 @@ where
 /// length, and the fingerprint the seed derives to. The returned
 /// [`Secret`] wipes on drop.
 pub fn unseal_seed(
-    sealing_key: &[u8; 32],
+    sealing_key: &SealingKey,
     capsule: &Capsule,
 ) -> Result<Secret<[u8; SEED_LEN]>, CapsuleError> {
     if capsule.magic != MAGIC {
@@ -205,9 +205,8 @@ pub fn unseal_seed(
     }
     fixed_fields(capsule)?;
 
-    let mut raw_key = *sealing_key;
     let cipher =
-        XChaCha20Poly1305::new_from_slice(&raw_key).expect("sealing key is exactly 32 bytes");
+        XChaCha20Poly1305::new_from_slice(sealing_key.expose()).expect("sealing key is 32 bytes");
 
     let mut aad = Vec::with_capacity(MAGIC.len() + capsule.fingerprint.len());
     aad.extend_from_slice(&capsule.magic);
@@ -220,7 +219,6 @@ pub fn unseal_seed(
             aad: &aad,
         },
     );
-    raw_key.zeroize();
     let mut plaintext = plaintext.map_err(|_| CapsuleError::Decrypt)?;
 
     if plaintext.len() != SEED_LEN {
@@ -261,8 +259,8 @@ mod tests {
 
     /// A fixed test key; capsule tests are sealed-envelope round-trips and
     /// do not depend on the TEE seam at all.
-    fn fake_key() -> [u8; 32] {
-        [0x42; 32]
+    fn fake_key() -> SealingKey {
+        SealingKey::new([0x42; 32])
     }
 
     /// Round-trip: what seal_seed writes, unseal_seed reads back byte-for-byte.
@@ -377,7 +375,7 @@ mod tests {
         let key = fake_key();
         let seed = a_seed();
         let other = [0xABu8; 32];
-        let cipher = XChaCha20Poly1305::new_from_slice(&key).expect("32-byte key");
+        let cipher = XChaCha20Poly1305::new_from_slice(key.expose()).expect("32-byte key");
         let nonce = [0x22u8; NONCE_LEN];
         let mut aad = Vec::with_capacity(MAGIC.len() + other.len());
         aad.extend_from_slice(&MAGIC);

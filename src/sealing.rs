@@ -54,6 +54,36 @@ impl Attestation {
     }
 }
 
+/// A sealing key: hardware-derived on the enclave, or the public
+/// dev-escape key in `non-tee` builds. Zeroized on drop; not `Clone`.
+pub struct SealingKey([u8; 32]);
+
+impl SealingKey {
+    /// Wraps raw key bytes. Prefer the constructors: this exists for
+    /// callers who already hold the bytes (e.g. test fixtures).
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The key bytes, for keying an AEAD.
+    pub fn expose(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for SealingKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SealingKey(REDACTED)")
+    }
+}
+
+impl Drop for SealingKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
 /// Domain string mixed into [`dev_sealing_key`].
 #[cfg(feature = "non-tee")]
 const DEV_SEALING_DOMAIN: &[u8] = b"ZNS_DEV/sealing-key/v1";
@@ -64,14 +94,14 @@ const DEV_SEALING_DOMAIN: &[u8] = b"ZNS_DEV/sealing-key/v1";
 /// off the enclave. A dev-key boot cannot unseal a production capsule:
 /// the AEAD tag is the boundary between the two worlds.
 #[cfg(feature = "non-tee")]
-pub fn dev_sealing_key(context: &[u8]) -> [u8; 32] {
+pub fn dev_sealing_key(context: &[u8]) -> SealingKey {
     use sha2::{Digest, Sha256};
 
     let mut h = Sha256::new();
     h.update(DEV_SEALING_DOMAIN);
     h.update((context.len() as u32).to_le_bytes());
     h.update(context);
-    h.finalize().into()
+    SealingKey::new(h.finalize().into())
 }
 
 /// Derives the per-instance sealing key from the SEV-SNP firmware:
@@ -106,7 +136,7 @@ fn guest_open_error(
 
 /// first reboot.
 #[cfg(target_os = "linux")]
-pub fn derive_sealing_key(_context: &[u8]) -> Result<[u8; 32], TeeError> {
+pub fn derive_sealing_key(_context: &[u8]) -> Result<SealingKey, TeeError> {
     use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 
     let mut firmware =
@@ -117,6 +147,7 @@ pub fn derive_sealing_key(_context: &[u8]) -> Result<[u8; 32], TeeError> {
     let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
     firmware
         .get_derived_key(Some(1), request)
+        .map(|key| SealingKey::new(key))
         .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))
 }
 
@@ -138,7 +169,7 @@ pub fn get_attestation(report_data: &[u8; 64]) -> Result<Attestation, TeeError> 
 /// [`TeeError::Unavailable`] at runtime. Development uses
 /// [`dev_sealing_key`] and simply has no attestation.
 #[cfg(not(target_os = "linux"))]
-pub fn derive_sealing_key(_context: &[u8]) -> Result<[u8; 32], TeeError> {
+pub fn derive_sealing_key(_context: &[u8]) -> Result<SealingKey, TeeError> {
     Err(TeeError::Unavailable)
 }
 
@@ -176,11 +207,17 @@ mod tests {
 
     #[test]
     fn dev_sealing_key_is_deterministic() {
-        assert_eq!(dev_sealing_key(b"ctx"), dev_sealing_key(b"ctx"));
+        assert_eq!(
+            dev_sealing_key(b"ctx").expose(),
+            dev_sealing_key(b"ctx").expose()
+        );
     }
 
     #[test]
     fn dev_sealing_key_scoped_by_context() {
-        assert_ne!(dev_sealing_key(b"ctx-a"), dev_sealing_key(b"ctx-b"));
+        assert_ne!(
+            dev_sealing_key(b"ctx-a").expose(),
+            dev_sealing_key(b"ctx-b").expose()
+        );
     }
 }
