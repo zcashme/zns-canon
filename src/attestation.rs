@@ -5,21 +5,21 @@
 //! script and the attestation logic is independently testable and auditable.
 //!
 //! Flow:
-//!   1. `report_data()` — compute the 64-byte blob that binds the attestation
-//!      to this specific capsule (BLAKE2b-512 of fingerprint ‖ capsule_hash).
-//!   2. `request()` — call the PSP via `/dev/sev-guest` for a normal SNP
-//!      report. That report is the VCEK-signed evidence.
+//!   1. `capsule::hash()` — BLAKE2b-256 of the capsule's on-disk bytes.
+//!   2. `request()` — compute the 64-byte `report_data` that binds the
+//!      attestation to this specific capsule (BLAKE2b-512 of
+//!      fingerprint ‖ capsule hash), then call the PSP via `/dev/sev-guest`
+//!      for a normal SNP report. That report is the VCEK-signed evidence.
 //!   3. Fetch the public VCEK and ASK from AMD's Key Distribution Service.
 //!      The ARK in that response is not the trust anchor.
 //!   4. `verify_vcek_report()` — require the ASK to chain to a pinned AMD
 //!      ARK, and the VCEK signature to cover the report.
 //!      `Attestation::verify_report_data()` then checks `report_data` and
 //!      that the measurement is not zero. Both run before the attestation
-//!      report is written to disk. `stored()` repeats the KDS fetch and the
-//!      signature check before a report already on disk is used, and returns
-//!      an error instead of panicking.
+//!      report is written to disk. `verify()` and `stored()` repeat the KDS
+//!      fetch and the signature check before a report already on disk is
+//!      used, and return an error instead of panicking.
 
-use blake2b_simd::Params as Blake2bParams;
 use sev::certs::snp::ca::Chain as CaChain;
 use sev::certs::snp::{builtin, Certificate, Chain, Verifiable};
 use sev::firmware::guest::AttestationReport;
@@ -117,23 +117,12 @@ impl Attestation {
 ///
 /// Without this binding, an attacker could take a valid attestation from
 /// one ceremony and claim it was for a different capsule.
-pub fn report_data(
-    fingerprint: &SeedFingerprint,
-    capsule_hash: &[u8; 32],
-) -> [u8; REPORT_DATA_LEN] {
+fn report_data(fingerprint: &SeedFingerprint, capsule_hash: &[u8; 32]) -> [u8; REPORT_DATA_LEN] {
     let mut input = Vec::with_capacity(FINGERPRINT_LEN + 32);
     input.extend_from_slice(&fingerprint.to_bytes());
     input.extend_from_slice(capsule_hash);
 
-    let digest = Blake2bParams::new()
-        .hash_length(REPORT_DATA_LEN)
-        .to_state()
-        .update(&input)
-        .finalize();
-
-    let mut report_data = [0u8; REPORT_DATA_LEN];
-    report_data.copy_from_slice(digest.as_bytes());
-    report_data
+    crate::blake2b(&input)
 }
 
 /// Request a SEV-SNP attestation report from the AMD PSP.
@@ -156,7 +145,24 @@ pub fn report_data(
 ///
 /// The AMD PSP records the launch measurement. A verifier outside the guest
 /// compares it to the built image.
-pub fn request(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
+/// Request a SEV-SNP attestation report binding this capsule to this seed
+/// fingerprint.
+///
+/// The report embeds
+/// `report_data = BLAKE2b-512(seed_fingerprint ‖ BLAKE2b-256(capsule_bytes))`,
+/// computed here: callers pass the capsule's on-disk bytes and never touch
+/// the report layout.
+///
+/// The AMD PSP records the launch measurement. A verifier outside the guest
+/// compares it to the built image.
+pub fn request(capsule_bytes: &[u8], expected_fingerprint: &SeedFingerprint) -> Attestation {
+    request_report_data(&report_data(
+        expected_fingerprint,
+        &crate::capsule::hash(capsule_bytes),
+    ))
+}
+
+fn request_report_data(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
     #[cfg(not(target_os = "linux"))]
     {
         // No counterfeit attestations: off the enclave there is no
@@ -185,7 +191,10 @@ pub fn request(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
     }
 }
 
-/// Load an attestation report and verify it again before its fields are used.
+/// Verify a stored report against the capsule it claims to attest: the
+/// report must embed
+/// `report_data = BLAKE2b-512(seed_fingerprint ‖ BLAKE2b-256(capsule_bytes))`,
+/// pass the VCEK signature check, and chain to a pinned AMD ARK.
 ///
 /// On Linux this parses the stored report, fetches the VCEK and ASK from AMD
 /// KDS, and checks the signature, `report_data`, and measurement. It does not
@@ -194,6 +203,22 @@ pub fn request(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
 ///
 /// Returns [`AttestationError::Unavailable`] on non-Linux: there is no dev
 /// attestation to verify.
+pub fn verify(
+    capsule_bytes: &[u8],
+    expected_fingerprint: &SeedFingerprint,
+    report_bytes: Vec<u8>,
+) -> Result<Attestation, AttestationError> {
+    stored(
+        report_bytes,
+        &report_data(expected_fingerprint, &crate::capsule::hash(capsule_bytes)),
+    )
+}
+
+/// Verify a stored report whose expected `report_data` the caller composed.
+///
+/// Capsule attestations should use [`verify`], which derives the expected
+/// `report_data` itself. This is the general form for callers whose report
+/// layout is their own (migration hand-off flows).
 pub fn stored(
     report_bytes: Vec<u8>,
     expected_report_data: &[u8; REPORT_DATA_LEN],
