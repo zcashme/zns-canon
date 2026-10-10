@@ -105,18 +105,10 @@ impl Attestation {
     }
 }
 
-/// Compute the 64-byte `report_data` for the SEV-SNP attestation report.
-///
-/// `report_data = BLAKE2b-512(seed_fingerprint ‖ capsule_hash)`
-///
-/// The AMD PSP signs the attestation report, and the report includes this
-/// `report_data`. This cryptographically binds the attestation to this
-/// specific capsule: a verifier can recompute BLAKE2b-512 from the
-/// manifest's `seed_fingerprint` and `capsule_hash`, and check it matches
-/// the `report_data` inside the attestation report.
-///
-/// Without this binding, an attacker could take a valid attestation from
-/// one ceremony and claim it was for a different capsule.
+/// The capsule attestation layout:
+/// `report_data = BLAKE2b-512(seed_fingerprint ‖ BLAKE2b-256(capsule_bytes))`.
+/// Binding the report to this pair is what stops one ceremony's attestation
+/// being reused for a different capsule.
 fn report_data(fingerprint: &SeedFingerprint, capsule_hash: &[u8; 32]) -> [u8; REPORT_DATA_LEN] {
     let mut input = Vec::with_capacity(FINGERPRINT_LEN + 32);
     input.extend_from_slice(&fingerprint.to_bytes());
@@ -125,36 +117,9 @@ fn report_data(fingerprint: &SeedFingerprint, capsule_hash: &[u8; 32]) -> [u8; R
     crate::blake2b(&input)
 }
 
-/// Request a SEV-SNP attestation report from the AMD PSP.
-///
-/// The PSP is a separate secure processor on the AMD chip. It signs the
-/// attestation report with the VCEK (Versioned Chip Endorsement Key), an
-/// ECDSA P-384 key whose certificate chains to AMD's root CA. The guest does
-/// not receive the VCEK private key. The seed-sealing key is a separate
-/// SEV-SNP derived key, not the VCEK.
-///
-/// On Linux, `request` asks the PSP for a normal SNP report, then fetches the
-/// VCEK and the ASK/ARK bundle from AMD KDS. Before the report is returned:
-/// 1. The report must say it was signed by the VCEK, not the VLEK.
-/// 2. The chip id must be present so the VCEK can be fetched.
-/// 3. The ASK from KDS must be signed by a pinned AMD ARK (Milan, Genoa, or Turin).
-/// 4. That ASK must sign the VCEK.
-/// 5. The VCEK's ECDSA P-384 / SHA-384 signature must cover the report.
-/// 6. `report_data` must match what we requested, and the measurement must
-///    not be all zeros.
-///
-/// The AMD PSP records the launch measurement. A verifier outside the guest
-/// compares it to the built image.
-/// Request a SEV-SNP attestation report binding this capsule to this seed
-/// fingerprint.
-///
-/// The report embeds
-/// `report_data = BLAKE2b-512(seed_fingerprint ‖ BLAKE2b-256(capsule_bytes))`,
-/// computed here: callers pass the capsule's on-disk bytes and never touch
-/// the report layout.
-///
-/// The AMD PSP records the launch measurement. A verifier outside the guest
-/// compares it to the built image.
+/// Request a SEV-SNP attestation binding this capsule to this seed
+/// fingerprint. Callers pass the capsule's on-disk bytes; the report layout
+/// is computed here.
 pub fn request(capsule_bytes: &[u8], expected_fingerprint: &SeedFingerprint) -> Attestation {
     request_report_data(&report_data(
         expected_fingerprint,
@@ -162,6 +127,8 @@ pub fn request(capsule_bytes: &[u8], expected_fingerprint: &SeedFingerprint) -> 
     ))
 }
 
+/// Ask the PSP for a report and verify it end-to-end: VCEK signature, pinned
+/// ARK chain, requested `report_data`, non-zero measurement.
 fn request_report_data(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
     #[cfg(not(target_os = "linux"))]
     {
@@ -192,17 +159,8 @@ fn request_report_data(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attesta
 }
 
 /// Verify a stored report against the capsule it claims to attest: the
-/// report must embed
-/// `report_data = BLAKE2b-512(seed_fingerprint ‖ BLAKE2b-256(capsule_bytes))`,
-/// pass the VCEK signature check, and chain to a pinned AMD ARK.
-///
-/// On Linux this parses the stored report, fetches the VCEK and ASK from AMD
-/// KDS, and checks the signature, `report_data`, and measurement. It does not
-/// call the PSP again. The file lives on host-backed storage, so an earlier
-/// check is not reused.
-///
-/// Returns [`AttestationError::Unavailable`] on non-Linux: there is no dev
-/// attestation to verify.
+/// report must embed the capsule layout's `report_data`, carry a valid VCEK
+/// signature, and chain to a pinned AMD ARK. Delegates to [`stored`].
 pub fn verify(
     capsule_bytes: &[u8],
     expected_fingerprint: &SeedFingerprint,

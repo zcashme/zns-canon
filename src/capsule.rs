@@ -26,13 +26,6 @@ use crate::sealing::SealingKey;
 /// The capsule magic; the first 8 bytes of every ZNS seed capsule.
 pub const MAGIC: [u8; 8] = *b"ZNS_SEED";
 
-/// The capsule hash: BLAKE2b-256 of the capsule's on-disk bytes. This is
-/// the `capsule_hash` bound into attestation report layouts, the genesis
-/// record, and the custody manifest.
-pub fn hash(capsule_bytes: &[u8]) -> [u8; 32] {
-    crate::blake2b(capsule_bytes)
-}
-
 /// The `XChaCha20Poly1305` nonce length.
 pub const NONCE_LEN: usize = 24;
 
@@ -249,6 +242,13 @@ pub fn unseal_seed(
     }
 
     Ok(Secret::new(seed_bytes))
+}
+
+/// The capsule hash: BLAKE2b-256 of the capsule's on-disk bytes — the
+/// `capsule_hash` in attestation layouts, the genesis record, and the
+/// custody manifest.
+pub fn hash(capsule_bytes: &[u8]) -> [u8; 32] {
+    crate::blake2b(capsule_bytes)
 }
 
 // ---------------------------------------------------------------------------

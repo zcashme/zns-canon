@@ -1,8 +1,8 @@
 //! Authenticated statement of the finished genesis ceremony.
 //!
-//! The capsule attestation in [`crate::attestation::report_data`] binds only
-//! the seed fingerprint and the capsule hash. This module binds the rest of
-//! the genesis state once the anchor transaction has a confirmed birthday.
+//! The capsule attestation binds only the seed fingerprint and the capsule
+//! hash. This module binds the rest of the genesis state once the anchor
+//! transaction has a confirmed birthday.
 //! Ceremony orchestration stays in `zns-keygen`; this is the canonical record.
 
 use crate::attestation::REPORT_DATA_LEN;
